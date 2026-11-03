@@ -1,70 +1,81 @@
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+import os
 
-# Asset names
-assets = ["Stock A", "Stock B", "Stock C"]
+folder = os.path.dirname(os.path.abspath(__file__))
+excel_files = [f for f in os.listdir(folder) if f.endswith(".xlsx")]
+FILE = os.path.join(folder, excel_files[0])
+print(f"Using file: {FILE}")
 
-# Expected returns
-returns = np.array([0.12, 0.10, 0.08])
+CAP = 0.40
+TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "TSLA"]
 
-# Covariance matrix
-cov_matrix = np.array([
-    [0.005, -0.010, 0.004],
-    [-0.010, 0.040, -0.002],
-    [0.004, -0.002, 0.023]
-])
+raw = pd.read_excel(FILE, sheet_name=0)
+raw.columns = [str(c).strip() for c in raw.columns]
+prices = raw[["Date"] + TICKERS].dropna().set_index("Date")
+returns = prices.pct_change().dropna()
+print(f"{len(prices)} daily prices, {len(returns)} daily returns ({prices.index[0]} to {prices.index[-1]})")
 
-num_portfolios = 5000  # many portfolios
+mu = returns.mean().values
+cov = returns.cov().values
 
-# Lists to store all portfolio results
-all_returns = []
-all_risks = []
+def portfolio_stats(w):
+    ret = float(w @ mu)
+    risk = float(np.sqrt(w @ cov @ w))
+    return ret, risk, ret / risk
 
-best_sharpe = -1
-best_weights = None
-best_return = 0
-best_risk = 0
+def maximize_sharpe(cap):
+    best = None
+    for seed in range(25):
+        start = np.repeat(1/5, 5) if seed==0 else np.random.default_rng(seed).dirichlet(np.ones(5))
+        out = minimize(lambda w: -portfolio_stats(w)[2], start, method="SLSQP", bounds=[(0, cap)]*5, constraints=({"type": "eq", "fun": lambda w: w.sum()-1},))
+        if out.success and (best is None or out.fun < best.fun):
+            best = out
+    return best.x
 
-# Generate portfolios
-for _ in range(num_portfolios):
-    weights = np.random.random(len(assets))
-    weights /= np.sum(weights)
+w_equal = np.repeat(1/5, 5)
+w_opt = maximize_sharpe(CAP)
 
-    portfolio_return = np.sum(weights * returns)
-    portfolio_risk = np.sqrt(weights.T @ cov_matrix @ weights)
+# --- Print in table format like expected ---
+print(f"\n{'':<22}{'Equal weight':>14}{'Optimized (40% cap)':>22}")
+for name, we, wo in zip(TICKERS, w_equal, w_opt):
+    print(f"{name:<22}{we*100:>13.1f}%{wo*100:>21.1f}%")
 
-    all_returns.append(portfolio_return)
-    all_risks.append(portfolio_risk)
+re, ke, se = portfolio_stats(w_equal)
+ro, ko, so = portfolio_stats(w_opt)
 
-    sharpe_ratio = portfolio_return / portfolio_risk
+print(f"{'Daily return':<22}{re*100:>13.3f}%{ro*100:>21.3f}%")
+print(f"{'Daily risk':<22}{ke*100:>13.3f}%{ko*100:>21.3f}%")
+print(f"{'Daily Sharpe':<22}{se:>14.4f}{so:>22.4f}")
+print(f"{'Annualized Sharpe':<22}{se*np.sqrt(252):>14.3f}{so*np.sqrt(252):>22.3f}")
+print(f"\nSharpe improvement vs equal weight: {(so/se-1)*100:.1f}%")
 
-    if sharpe_ratio > best_sharpe:
-        best_sharpe = sharpe_ratio
-        best_weights = weights
-        best_return = portfolio_return
-        best_risk = portfolio_risk
-
-# Print results
-print("\nOptimal Portfolio Allocation")
-for i, w in enumerate(best_weights):
-    print(f"{assets[i]}: {round(w*100, 2)}%")
-
-print("\nPortfolio Performance")
-print(f"Expected Return: {round(best_return*100,2)}%")
-print(f"Risk (Volatility): {round(best_risk*100,2)}%")
-print(f"Sharpe Ratio: {round(best_sharpe,2)}")
-
-# Pie chart
-plt.figure()
-plt.pie(best_weights, labels=assets, autopct='%1.1f%%')
-plt.title("Optimal Portfolio Allocation")
+# --- Charts ---
+keep = w_opt > 0.001
+plt.figure(figsize=(6,6))
+plt.pie(w_opt[keep], labels=np.array(TICKERS)[keep], autopct="%1.1f%%", startangle=90)
+plt.title(f"Optimal allocation (max {int(CAP*100)}% per stock)")
+plt.tight_layout()
+plt.savefig("optimal_allocation.png", dpi=200)
 plt.show()
 
-# Efficient frontier
-plt.figure()
-plt.scatter(all_risks, all_returns, alpha=0.3, color='blue')  # small dots
-plt.scatter(best_risk, best_return, color='red', marker='*', s=300)  # best portfolio
-plt.xlabel("Risk (Volatility)")
-plt.ylabel("Expected Return")
-plt.title("Efficient Frontier")
+rng = np.random.default_rng(42)
+pts = []
+while len(pts) < 5000:
+    w = rng.dirichlet(np.ones(5))
+    if w.max() <= CAP:
+        r,k,s = portfolio_stats(w)
+        pts.append((k,r,s))
+pts = np.array(pts)
+plt.figure(figsize=(8,5.5))
+plt.scatter(pts[:,0]*100, pts[:,1]*100, c=pts[:,2], cmap="viridis", s=8, alpha=0.7)
+plt.scatter(ke*100, re*100, c="grey", s=120, marker="D", label="Equal weight", edgecolor="white")
+plt.scatter(ko*100, ro*100, c="red", s=220, marker="*", label="Max Sharpe (40% cap)", edgecolor="white")
+plt.xlabel("Daily risk (%)"); plt.ylabel("Daily expected return (%)")
+plt.title("Efficient frontier (portfolios with max 40% per stock)")
+plt.legend(); plt.tight_layout()
+plt.savefig("efficient_frontier.png", dpi=200)
 plt.show()
+print("\nSaved: optimal_allocation.png, efficient_frontier.png")
